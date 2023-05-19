@@ -1,0 +1,774 @@
+---
+title: "BigDataWranglin_LNL"
+author: "Angie Ricono"
+date: "2023-05-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+This script is largely based on a "RCheatSheet" Markdown I started making myself my first year in PMB. This has been super helpful (especially when I keep up with it), so I encourage you all to try something similar! With field or benchwork we always keep a lab notebook - why not something similar when we code??
+
+
+# First and foremost: **Don't forget the basics!!** 
+Functions like: head(), tail(), row/colnames(), levels(factor(dat$myVar)) etc can be wildly useful when first checking to make sure your data look as expected. 
+
+
+# Angie's top five general rules of thumb for any large data project: 
+1. Spend a **GOOD** amount of time thinking about different ways you can "slice" your data. How many observations do you expect per (ex) treatment? What about per genotype within a treatment? What range of a given variable is reasonable? 
+
+2. Make yourself a metadata table right off the bat - and add to it often. 
+
+3. Check your data (within or outside of the global environment) - ALL THE TIME. 
+
+4. Simple plots (ie histograms; boxplots) are often very quick and easy to generate but provide immense insight into relationships within your data. Don't be a plotting snob (that can come later lol)!! I also highly suggest making a "MasterDF" as soon as possible (once your data are cleaned and you're confident in it) and write yourself a good plotting function for ggplot (ex: plotting gene expression for yourself, for your PI, for a presentation, and high quality for a paper).
+
+5. Excel can be clunky/can't handle massive datasets (1mil rows +), but that doesn't mean you can't pull a subset and manually check calculations.*Grouping/factors can be sneaky!*
+
+
+
+# Description of dataset:
+Today we will be using transcriptional data from a prolonged drought experiment using Brassica napus (Canola) as a model. Leaf tissue was collected for RNAsequencing throughout the day to capture diel transcriptional changes under a four week drought. There are three samples per genotype, per four time points, per one of two treatments (drought or well watered) and 16 genotypes total (*384 transcriptomes*). 
+
+Since B.napus is an allopolyploid it contains two subgenomes (AA and CC), which also means it has (up to) double the number of expressed genes. *On average, the full dataset contains ~15 million genes or about 4 million observations*. But don't worry, we'll only be working with a small portion of these data ;) 
+
+
+# Set up the environment
+As always, we start by setting up our environment. This should at least include any packages that will be used as well as what directory you want to work in. You may also be interested in establishing additional directories outside of your working directory to pull raw data or store figures, for example. 
+
+Once I have installed and loaded a package (in the past) the next time I call it I use the "require" function just because it's just less verbose than library and so things run a bit quicker. 
+
+If you have not installed any of these package before, use this chunk:
+```{r}
+install.packages(c("tidyverse", "data.table", "DiPALM", "ggpubr", "ggrepel", "edgeR"))
+library(tidyverse)
+library(data.table)
+library(DiPALM)
+library(ggpubr)
+library(ggrepel)
+library(edgeR)
+
+## Sometimes edgeR can be quite tempermental when loading for the first time. If that's the case try:
+  # if (!requireNamespace("BiocManager", quietly = TRUE))
+  # install.packages("BiocManager")
+  #BiocManager::install("edgeR")
+
+```
+Optionally, you can navigate to the bottom right quadrant, select the Packages tab, and just check the boxes for each package.
+
+
+
+```{r Set up the environment}
+# You must first install these packages before you use the 'require' function; it's just less verbose than library
+require(tidyverse)
+require(data.table)
+require(ggpubr)
+require(ggrepel)
+require(DiPALM)
+require(edgeR)
+
+
+setwd("~/Desktop/Git/LunchAndLearn")
+FigPath = "./Figures"
+RawCounts = "./RawDat"
+NormCount = "./NormCounts"
+```
+
+
+# Bring in the data. 
+Oftentime we get many files from a single output, and would like to bring these in all at once. We also want to add some sort of descriptor to identify which data belong to which file, or sample. For today we are going to start with a single B. napus genotype, "Av". We will be bringing in the individual count tables for each transcriptome (or sample) simultaneously and then renaming.
+
+
+**TIP**
+Because we want to normalize by genotype, and we have 16 total genotypes, write your script such that most/all can be run using a broad, generic name ("napus") and then save the file with a more specific ID ("Av_NormCounts"). This will not only be faster but will greatly reduce the potential for human error! 
+(Also, using Control-F on a highlighted piece of code is a much more efficient and less error prone way to change IDs, for example)
+
+```{r Bring in Data and normalize}
+# Create a vector that contains the name of files to loop over
+  ### FOR THIS CODE, MAKE SURE YOU DON'T HAVE OTHER TXT FILES IN THE FOLDER ### 
+filenames <- list.files(RawCounts, pattern="*.txt")
+
+# Make sure these names look correct and you have the right number (4tps*3reps*2treatments = 24)
+print(filenames)
+
+
+# Compile all files into a list with one element for each file
+napus = lapply(filenames, function(i) {
+    read.table(file.path(RawCounts, file = i), header = TRUE) 
+})
+
+# What sort of data are we dealing with? Look at just the first one
+str(napus[[1]])
+# Read length? 
+range(napus[[1]]$Length)
+
+  # Always keep track of list elements with some sort of ID
+names(napus) = filenames
+
+
+## Normalize counts. With many calls/functions often a for loop is easier
+  # Initialize some empty vectors to fill in as with any for loop
+NormCounts = ""
+cnts = ""
+
+for (i in 1:length(napus)) {
+  # Show me where I'm at in the loop
+  print(i)
+  # Set rownames to the gene annotation to keep things straight downstream
+  rownames(napus[[i]]) = napus[[i]]$Geneid
+  # For each gene, take the length and add the gene name to that length
+  geneLen = setNames(abs(napus[[i]]$Length), nm = napus[[i]]$Geneid)
+  # rpkm function requires a separate count vector
+  cnts[[i]] = napus[[i]][7]
+  # Bind cnts into the proper format
+  cnts = do.call(cbind, cnts)
+  # Rest is edgeR specific; normalizing
+  cntsDge<- DGEList(counts = cnts)
+  cntsDge<- calcNormFactors(cntsDge)
+  NormCounts<- rpkm(cntsDge, log=T, gene.length = geneLen, prior.count=0)
+}
+
+#there will be a number of NAs, but it's a good idea to check to make sure this number isn't larger than what seems reasonable
+which(is.na(NormCounts))
+tail(NormCounts)
+  # What is the proportion of NA's?
+### Add this number to the metadata table to check after filtering ### 
+length(which(is.na(NormCounts)))/(nrow(NormCounts) * 23)
+
+
+##### CHANGE FILENAME BASED ON GENOTYPE #####
+#save(NormCounts, file.path(inPath, file = "Av_NormCounts.RData"))
+##### ##### ##### ##### ##### ##### ##### ###
+
+
+```
+
+
+# Explore and clean your data 
+This may be one of the most important steps of any data analysis. Here we will attempt to get a first glimpse at our large dataset. What you look at will likely vary on what types of questions you have and what sort of data you collected. In the following chunks I provide some of my main go-to's that are likely appropriate for many datasets. 
+
+Before we can get to those, we first want to make sure that everything is neat and tidy, and that everything is named and sorted (and filtered!) properly.
+```{r Start cleaning the data}
+## Fix the column names
+DF = data.frame(NormCounts)
+colnames(DF)
+# Create a separate vector to mess with and when that's good can set colnames to that (also faster)
+colnms<-colnames(data.frame(NormCounts))
+
+rownames(DF)
+tail(rownames(DF))
+
+
+# remove the bam. and .bam 
+colnms<-gsub("bam.","",colnms)
+colnms<-gsub(".bam","",colnms)
+  # 20 and 100 is the percent of water the plant received; 20 = drought and 100 = well watered
+colnms<-gsub("20","Drought",colnms)
+colnms<-gsub("100","Watered",colnms)
+  # clean up the replicate IDs
+colnms<-gsub("Drought.1","Drought_R1",colnms)
+colnms<-gsub("Drought.2","Drought_R2",colnms)
+colnms<-gsub("Drought.3","Drought_R3",colnms)
+colnms<-gsub("Watered.1","Watered_R1",colnms)
+colnms<-gsub("Watered.2","Watered_R2",colnms)
+colnms<-gsub("Watered.3","Watered_R3",colnms)
+  # remove ZT descriptor so it becomes numeric downstream
+colnms<-gsub("ZT","",colnms)
+colnms
+
+# str_replace and str_replace_all might also be viable options....
+help(str_replace_all)
+colnames(DF) %>% str_replace_all(c("20" = "Drought", "100" = "Watered"))
+
+
+##### GENOTYPE SPECIFIC #####
+colnms<-gsub("Av1.30","Av",colnms)
+##### ##### ##### ##### ##### 
+
+
+# Make sure the order time points/reps between these two match!
+colnms
+colnames(DF)
+
+# Set cleaned column names to previous DF
+colnames(DF)<-colnms
+
+# Will need a matrix downstream; the number observations in both dimensions should match NormCounts
+  # Now can go back to a broader object name
+CleanGenes = as.matrix(DF)
+
+colnames(CleanGenes)
+tail(CleanGenes)
+
+# It appears that there is a "gene:" prefix to the oleracea annotations; remove
+rownames(CleanGenes) = gsub("gene:", "", rownames(CleanGenes))
+  # Now we can work on cleaning up the NaN's
+tail(CleanGenes)
+```
+
+
+# Look at the distribution of your data. 
+Is it what you expected? Is it normally distributed? Bimodal? Simple histogram plots can give you great insight into what your data look like and what might be happening biologically. 
+
+You will almost certainly need to do some sort of filtering to try and get an idea of what bits of your data are important to focus on. This doesn't mean you can't come back and try new plots/analyses to come up with additional hypotheses! To start, take the time to reflect on what your major question(s) is, and what you need to answer that question. 
+
+For us, we are interested in identifying candidate genes with differential diel transcriptional patterns under drought conditions. So first, we want to make sure that all genes we look at are 1. expressed (not all NaN across time points), 2. expressed at a decent level in at least one time point, and 3. that every gene has some level of variance between the time points (this is required for our pipeline).
+
+Now that we have normalized the data we are using log2FPKM as our expression values. As a reminder, the log of any number less than one will be negative, and the log of zero is NaN.
+
+This chunk is pretty straightforward, so I will go through quickly just to give you an example. This is the first instance of using a member of the apply family, so I first provide a line to reference that vingette with examples (and links to other members of this family). The second ("??x") line is a way to further explore a function if you do not already have it installed.
+
+```{r Distribution of mean expression}
+# Calculate the mean of every gene to look at the distribution in expression levels, outside of time of day
+help(apply)
+??apply
+
+
+geneMeans<-apply(CleanGenes,1,function(x) mean(x,na.rm = T))
+  # Plot with base R
+hist(geneMeans,col="skyblue", breaks = seq(-12,16,0.25), main = "GeneMeans")
+abline(v=0,col="red",lwd=3,lty=2)
+
+
+## Subsetting with base R 
+  # Remove genes that do not have at least one sample with mean log2 FPKM >0
+FilteredGenes<-CleanGenes[which(geneMeans>0),]
+  # Plot again to make sure retaining genes with mean >0
+geneMeans<-apply(FilteredGenes,1,function(x) mean(x,))
+hist(geneMeans,col="skyblue", breaks = seq(-12,16,0.25), main = "FPKM >0")
+abline(v=0,col="red",lwd=3,lty=2)
+
+  # Check that the number/proportion of genes removed makes sense
+(nrow(CleanGenes) - nrow(FilteredGenes)) / nrow(CleanGenes)
+
+
+# Replace NaNs resulting from taking the log of 0 (when normalizing counts) by adding a small bit of 'expression' data to them
+ProcessedGenes = FilteredGenes
+minVal<-min(FilteredGenes[!is.na(FilteredGenes)])-1
+
+ProcessedGenes[is.na(ProcessedGenes)]<-minVal
+  # double check
+length(which(is.na(FilteredGenes)))
+length(which(is.na(ProcessedGenes)))
+
+
+# Final plot to double check; depending on the number of NaNs you start with you may see a small tail below zero
+geneMeans<-apply(ProcessedGenes,1,function(x) mean(x,na.rm = T))
+hist(geneMeans,col="skyblue", breaks = seq(-12,16,0.25), main = "Processed Genes")
+abline(v=0,col="red",lwd=3,lty=2)
+```
+
+Keep in mind for later - *we have now imposed another layer (minVal - 1) to our dataset, just to keep NaN genes!* We will have to remember this in downstream analyses to make sure that we are interpreting patterns/responses appropriately. 
+
+
+# Sometimes, organisms die. Here's one way to resurrect them
+Impute missing samples if necessary. We use the median expression of the remaining replicates to fill in any missing time points.
+```{r Imputting using apply}
+ImputedGenes = data.frame(ProcessedGenes)
+  # Check to see which replicates, if any, are missing
+colnames(ImputedGenes)
+
+
+##### GENOTYPE SPECIFIC #####
+ImputedGenes$Av_19_Watered_R3 = ImputedGenes %>%
+  select(Av_19_Watered_R1, Av_19_Watered_R2) %>%
+  apply(1, median)
+ ##### ##### ##### ##### #####
+colnames(ImputedGenes)
+
+ImputedGenes = as.matrix(ImputedGenes)
+```
+
+
+
+# Reshape your data - matrices and (I love, love, love me some ) lists
+We saw a moment ago that we now have 3 reps for each of our 4 time points and 2 treatments. Hoorah! However, it's not in the best format to work with. At the very least, we saw that the columns are out of order (time wise) so we will need to fix that. 
+
+Before reordering, I'd like to show you something I heavily borrowed from Ryan Sartor, co-creator of the DiPALM package. With a few functions we can take any matrix and essentially reshape it into a list - and from that, another 2D structure or matrix - but with different components acting as different dimensions. This can be incredibly helpful when you have multi-layered data and want to perform the same set of analyses but on different pieces or layers. 
+
+For example, we have a matrix (Imputed Genes) that contains expression date for each gene by replicate/treatment/timepoint. What if we want to do analyses by timepoint? Across time points? How do we compress the information (which is stored in the column names) in such a way that we don't have to create a sh*t ton of data frames and then try to recombine? 
+```{r}
+# Create a dummy variable to manipulate so you're not working with the big momma
+tmp = ImputedGenes
+# Split the names by a separator
+spNms<-strsplit(x = colnames(tmp), split = "_")
+  # Creates a list of length = # columns and each list element is a piece of each column name
+spNms
+
+# Take the full names (Geno_Zt_Treat_Rep) and collapse them to Treatment.R1
+tnms<-sapply(spNms,function(x) paste(x[c(3,4)],collapse = "_"))
+  # We have now created an index that we can use to rearrange our original matrix
+tnms
+
+# Separate by sample type
+FilteredTCs<-tapply(1:length(tnms),INDEX = tnms, function(x) tmp[,x])
+
+
+# Find what genes = TRUE for var > 0
+varFiltered<-lapply(FilteredTCs,function(x) apply(x,1,function(y) var(y)>0))
+# Bind into a matrix of TRUE instances (for above) by sample type
+varFiltered<-do.call(cbind,varFiltered)
+# Take logical data and find which vectors have all TRUEs
+varFiltered<-apply(varFiltered,1,function(x) all(x))
+# Adding gene names back
+varFiltered<-names(varFiltered)[which(varFiltered)]
+# Apply the above list to the previous data (seperated by TC; all tps for each replicate by treatment)
+TCs<-lapply(FilteredTCs,function(x) x[varFiltered,])
+
+## Reorder by Zt (here y = 2; or the second piece of the colname)
+  # downstream will need both a list with elements as TCs (colnames as timepoint)
+TCs_List<-lapply(TCs,function(x) x[,order(as.numeric(sapply(strsplit(colnames(x),split = "_"),function(y) y[2])))])
+
+
+## Reorder by Zt (here y = 2; or the second piece of the colname)
+  # Just like a for loop you can have nested lapply functions, which are more efficient
+TCs_List<-lapply(FilteredTCs,function(x) x[,order(as.numeric(sapply(strsplit(colnames(x),split = "_"),function(y) y[2])))])
+
+#Each element should be an entire time course, with elements separated into replicates (length = #Reps*#Treatments) 
+sapply(TCs_List,colnames)
+
+# Remove any annotation (ie ENSRNA genes) that are not Bra or Bo
+(str_detect(rownames(TCs_List[[1]]), "Bra|Bo"))
+which((str_detect(rownames(TCs_List[[1]]), "Bra|Bo")))
+which((str_detect(rownames(TCs_List[[1]]), "Bra|Bo")) == FALSE)
+TCs_List[[1]][which((str_detect(rownames(TCs_List[[1]]), "Bra|Bo")) == FALSE),] %>% rownames()
+
+TCs_List = lapply(TCs_List, function(x) x[which(str_detect(rownames(x), "Bra|Bo") == TRUE),])
+
+
+## Add a treatment prefix to every gene
+Drought = TCs_List[1:3]
+names(Drought)
+Control = TCs_List[4:6]
+names(Control)
+
+# Create rownames for the two lists
+##### CHANGE BASED ON GENOTYPE #####
+Drought_names = paste("Av", "Drought", rownames(Drought[[1]]), sep = "_")
+Control_names = paste("Av", "Control", rownames(Control[[1]]), sep = "_")
+# check
+Drought_names
+Control_names 
+##### ##### ##### ##### ##### #####
+
+
+# Update the rownames
+  # Note the need for {} here!
+Drought = lapply(Drought, function(x) {rownames(x) = Drought_names; x})
+Control = lapply(Control, function(x) {rownames(x) = Control_names; x})
+# check
+sapply(Drought, rownames)
+sapply(Control, rownames)
+
+
+# Bind them back together
+    # The first line makes a list of lists
+lst1 = list(Drought, Control)
+  #then unlist the first list to get back to the original format
+TCs_List = unlist(lst1, recursive = FALSE)
+
+
+# Compile into a large matrix. columns are time points and rows are Geno_Treat_Gene
+TCs_Mat<-do.call(rbind,TCs_List)
+head(TCs_Mat)
+tail(TCs_Mat)
+
+
+## Fix the colnames since reps and treatments get added on iteratively
+  # Each column represents a single time point but all reps and treatments (time series)
+colnames(TCs_Mat) = c("Zt1", "Zt7", "Zt13", "Zt19")
+```
+
+
+
+# Checking for technical variation
+Before proceeding any further I *HIGHLY* suggest that you choose at least one way (more are better!) to account for any technical variation between samples. 
+
+In this example I am simply calculating the coefficient of variation (CV) and plotting that among all samples for our one genotype. To do this; however, we need to reshape our data into a different format, preferrably a data frame. 
+
+Additionally we can include another genotype and use that to check out different binding functions and also compare CV among them. 
+```{r Creating a MasterDF to look at CV}
+# Load the additional genotype
+load("St_DF.RData")
+
+### Note that this comes up as just DF because of using our "broad naming" scheme!
+St_exprs_df = DF
+  # Remove DF since it's not necessary anymore
+rm(DF)
+
+
+## Prep expression lists
+  # make a df to make it easier to manipulate
+Av_exprs_df = data.frame(do.call(cbind, TCs_List))
+tail(rownames(Av_exprs_df))
+tail(Av_exprs_df)
+which(is.na(Av_exprs_df))
+which(is.na(St_exprs_df))
+  # Be aware that these are expressed genes, so there are likely differences between what genes are found in which geno
+tail(St_exprs_df)
+
+
+# Compare the bound MasterDF with different joining functions
+  # To join we need a common column(s) to bind by 
+Av_exprs_df$Geno = "Av"
+St_exprs_df$Geno = "St"
+
+# inner_join requires matches between the two, which we don't have. Good for chr data
+#innerDF = inner_join(Av_exprs_df, St_exprs_df)
+fullDF = full_join(Av_exprs_df, St_exprs_df)
+leftDF = left_join(Av_exprs_df, St_exprs_df)
+rightDF = right_join(Av_exprs_df, St_exprs_df)
+
+rm(fullDF, leftDF, rightDF)
+
+
+# Clip off the geno id in the column names to bind later (need the same colnames)
+  # The start and stop will identify the area you want to **keep**, not remove
+colnames(Av_exprs_df) = substr(colnames(Av_exprs_df), start = 4, stop = 15)
+colnames(St_exprs_df) = substr(colnames(St_exprs_df), start = 4, stop = 15)
+  ### Here's the issue with using start and stops....
+names(Av_exprs_df)
+  # Doesn't work well....
+colnames(Av_exprs_df)[c(3, 4)] = paste0(colnames(Av_exprs_df)[c(3,4)], 1)
+colnames(St_exprs_df)[c(3, 4)] = paste0(colnames(St_exprs_df)[c(3,4)], 1)
+
+# Re-load to before the joins were performed
+Av_exprs_df = data.frame(do.call(cbind, TCs_List))
+load("St_DF.RData")
+St_exprs_df = DF
+
+
+#bring in the rownames; this will be used to index when we pivot
+Av_exprs_df = rownames_to_column(Av_exprs_df, var = "IDs")
+colnames(Av_exprs_df) = gsub("Av_", "", colnames(Av_exprs_df))
+St_exprs_df = rownames_to_column(St_exprs_df, var = "IDs")
+colnames(St_exprs_df) = gsub("St_", "", colnames(St_exprs_df))
+
+
+# Bind into one large df
+  ### This only works with the same number of columns!
+colnames(Av_exprs_df)
+colnames(St_exprs_df)
+MasterDF = rbind(Av_exprs_df, St_exprs_df)
+
+# Separate the index (IDs) into Geno, Treatment and Gene
+MasterDF = MasterDF %>% separate(IDs, c("Geno", "Treatment", "Gene"), remove = FALSE)
+  # This method isn't always perfect....
+levels(factor(MasterDF$Treatment))
+
+
+## For today, bring in a previously cleaned/checked MasterDF 
+load("MasterDF_LL.RData")
+# Simplify this beast to run calculations quicker
+MasterDF = MasterDF %>% filter(Geno == "Av" | Geno == "St")
+
+
+# Calculate gene level CV
+CV = MasterDF %>% 
+  group_by(Geno, Treatment, Zts, Gene) %>% 
+  mutate(sd_byGene = sd(Expression), 
+         avg_byGene = mean(Expression), 
+         #here I am taking the absolute value because we don't care about the directionality just the magnitude
+         CV_byGene = abs(sd_byGene/avg_byGene)) %>%
+  ungroup() 
+
+
+# Plot the CV by rep and tp
+CV %>%
+  ggplot(aes(x = Zts, y = CV_byGene)) +
+  geom_boxplot()
+```
+
+
+
+# Unsupervised visualization - what trends do you expect? Which are important? Do all replicates/treatments/levels line up as they should? 
+
+Here will we use the TCs_List object we created for our one genotype. Each element is a matrix containing a single time course, which means all time points for each replicate, by treatment (3 reps * 2 treatments = 6 elements each containing 4 time points). 
+
+Before doing any sort of dimension reduction (ie PCAs) I like to just look at the relationship between individual samples to see how they cluster. It's always a good idea to use more than one type of clustering method, so we will follow that with a pca to see if trends align.
+
+We start will all expression data, and then compare that dendrogram (tree) to trees using just drought and just control to see if things make sense. 
+
+```{r Dendrograms}
+# Make a dataframe to make the clustering a bit easier
+DF = data.frame(TCs_List)
+
+# Fix the column names; the name from each list element is pasted in column names when creating the dataframe
+names(DF) = gsub(x = names(DF), pattern = "Drought_R..", replacement = "")
+names(DF) = gsub(x = names(DF), pattern = "Watered_R..", replacement = "")
+names(DF)
+
+# Cluster samples
+sampleTree= hclust(dist(t(DF)), method = "average")
+
+# Using base R to plot so not a bad idea to set up the plotting environment to not suck
+par(cex = 0.6)
+par(mar = c(0,4,2,0))
+
+plot(sampleTree, main = "Using hclust to detect outliers; all data", sub="", xlab="", cex.lab = 1.5,cex.axis = 1.5, cex.main = 2)
+
+
+# Just control
+colnames(DF)
+ControlDF = DF[, 13:24]
+colnames(ControlDF)
+sampleTree2 = hclust(dist(t(ControlDF)), method = "average")
+
+# Plot
+plot(sampleTree2, main = "Using hclust to detect outliers (Control)", sub="", xlab="", cex.lab = 1.5,cex.axis = 1.5, cex.main = 2)
+
+# Just drought
+colnames(DF)
+DroughtDF = DF[, 1:12]
+colnames(DroughtDF)
+sampleTree3 = hclust(dist(t(DroughtDF)), method = "average")
+
+# Plot
+plot(sampleTree3, main = "Using hclust to detect (Drought)", sub="", xlab="", cex.lab = 1.5,cex.axis = 1.5, cex.main = 2)
+```
+
+
+# Now we look at some PCAs....
+I generally look at both control, treatment, and together individually. That said, it really isn't a bad idea to start exploring just your control data before you really look at treatment stuff. If the controls don't look good, then it might take some work/reconsidering before you take the time to start comparing your treatments. 
+```{r PCAs}
+controlPCA = prcomp(DF, scale = T)
+
+# Make the prcomp object plottable 
+  # grab the actual values
+controlPCA_dat = data.frame(controlPCA$rotation)
+  # set names
+controlPCA_dat = rownames_to_column(controlPCA_dat, var = "IDs")
+  # clean 
+controlPCA_dat = controlPCA_dat %>% separate(IDs, c("Geno", "Rep", "Treatment", "Zt"), remove = FALSE)
+  # pull out the variance explained
+var = controlPCA$sdev^2/sum(controlPCA$sdev^2)
+
+#Make a quick scree plot
+var = data.frame(var = var, PC = seq(1, 48, by = 1))
+var %>% ggplot(aes(x = PC, y = var)) +
+  geom_bar(stat = "identity")
+
+percentVar <- data.frame(PC = var$PC, percentVar = round(100 * var$var, digits = 2))
+
+
+#Plot 
+controlPCA_dat %>%
+    ggplot(aes(PC1, PC2, color = Treatment)) + 
+    #scale_colour_manual(values = c("chartreuse4", "skyblue4", "darkgoldenrod1")) +
+    xlab(paste0("PC1 (", percentVar$percentVar[1], "%)")) + 
+    ylab(paste0("PC2 (", percentVar$percentVar[2], "%)")) +
+    theme_bw() +
+    geom_text(aes(label = IDs), size = 3, vjust = "inward", hjust = "inward") +
+    scale_colour_manual(values=c("darkgoldenrod1", "chartreuse4")) +
+  ggtitle("Expression PCA by replicate")
+```
+
+
+
+Validating gene expression - simple plots as an excuse to use pivoting functions.
+```{r}
+load("Av_BlockModsAll.RData")
+
+#extract the eigengenes
+MEs = BlockModsAll[[3]]
+#Add Zts to plot
+MEs = rownames_to_column(MEs, var = "Zts")
+colnames(MEs)
+
+
+# Lengthen to create a column to plot with
+plottingMEs = pivot_longer(MEs, cols = !Zts, names_to = "Modules", values_to = "Expression")
+
+# Now just want the numeric piece of the ID (ZTs) column to plot
+plottingMEs = plottingMEs %>% separate(Zts, c("Geno", "Zts", "Treatment","Rep"))
+
+
+# Plot
+plottingMEs %>%
+        group_by(Modules) %>%
+        ggplot(aes(x = as.numeric(Zts), 
+                   y = Expression, 
+                   fill = "black")) +
+        geom_line() +
+        facet_wrap(~Modules) +
+        xlab("Zt") +
+        ylab("Time series response") +
+        ggtitle("Co-expression Eigengene Patterns") +
+  theme_bw()
+
+
+# Plot clock genes with known patterns
+elf3_A04 = "BraA04g18480R"
+elf3_A09_20 = "BraA09g50820R"
+elf3_A09_30 = "BraA09g50830R"
+
+gi = "BraA09g38670R"
+lhy = "BraA10g01800R"
+lnk1 = "BraA06g25990R"
+lnk2_A04 = "BraA04g06240R"
+lnk2_A07 = "BraA07g20200R"
+lnk2_A09 = "BraA09g43520"
+
+cca1 = "BraA05g01930R"
+elf4_A03 = "BraA03g20890R"
+elf4_A04 = "BraA04g27180R"
+elf4_A05 = "BraA05g06590R"
+
+lux = "BraA06g19700R"
+
+prr1_A03 = "BraA03g42600R"
+prr1_A09 = "BraA09g07570R"
+
+prr5_A02 = "BraA02g43100R"
+prr5_A06 = "BraA06g29990R"
+prr5_A09 = "BraA09g06770R"
+
+prr7_A02 = "BraA02g01670R"
+prr7_A10 = "BraA10g31240R"
+
+prr9_A02 = "BraA02g01670R"
+prr9_A10 = "BraA10g31240R"
+
+rve4_A03 = "BraA03g01770R"
+rve4_A09 = "BraA09g45590R"
+rve4_A10 = "BraA10g31210R"
+
+rve8_A05 = "BraA05g35220R"
+rve8_A09 = "BraA09g56570R"
+
+#put into a list to loop through while plotting
+clock = list(elf3_A04,elf3_A09_20,elf3_A09_30,gi,lhy,lnk1,lnk2_A04,
+             lnk2_A07,lnk2_A09,cca1,elf4_A03,elf4_A04,elf4_A05,lux,
+             prr1_A03,prr1_A09,prr5_A02,prr5_A06,prr5_A09,prr7_A02,
+             prr7_A10,prr9_A02,prr9_A10,rve4_A03,rve4_A09,rve4_A10,
+             rve8_A05,rve8_A09)
+names(clock) = c("ELF3_A04","ELF3_A09_20","ELF3_A09_30","GI", "LHY","LNK1","LNK2_A04",
+             "LNK2_A07","LNK2_A09","CCA1","ELF4_A03","ELF4_A04","ELF4_A05","LUX",
+             "PRR1_A03","PRR1_A09","PRR5_A02","PRR5_A06","PRR5_A09","PRR7_A02",
+             "PRR7_A10","PRR9_A02","PRR9_A10","RVE4_A03","RVE4_A09","RVE4_A10",
+             "RVE8_A05","RVE8_A09")
+
+
+
+pdf(file.path(FigPath,"LL_ClockGenes.pdf"),width = 10,height = 5)
+### ### ### ### ### ### ### ###
+for(i in 1:length(clock)) {
+ print(MasterDF %>%
+          filter(Gene == clock[[i]] & Geno == "Av") %>%
+          ggplot(aes(x = Zts, y = Expression)) +
+          geom_line(aes(x = Zts, color = Treatment, group = interaction(Replicate, Treatment), linetype = Treatment), size = 1.2) +
+          scale_color_manual(values = c("darkolivegreen", "burlywood3", "deepskyblue3"), name = "Genotype") +
+          #base size is the font size
+          theme_classic(base_size = 18) +
+          xlab("Zts (hours after lights on)") +
+          ylab("Average Log2 FPKM") +
+          ggtitle(paste(names(clock)[i])) +
+          #axis.text.x changes the font of the xticks
+          theme(axis.text.x=element_text(size=10), 
+                #move the legend around, = "none" to remove
+                legend.position = "bottom"))
+}
+dev.off()
+```
+
+
+Finally, heatmaps. These really are made for big data, so I would get comfortable with looking at them, interpreting them, and thinking about what you might expect to see from a given hypothesis. 
+
+These are intended to pull out either relatively large differences in smaller datasets, or relatively small differences in large datasets. Keep in mind what you are inputting and what you are hoping to pull out. 
+
+Since we have such a large number of comparisons, it makes sense to average the replicates and look at diel drought responses within a genotype. This next chunk performs the averaging and plots the average expression by time point using pheatmap, which is far faster than ggtile. 
+
+Because we have so many comparisons (genes) this can take quite a bit of memory if you want to plot all genes. For today, I have provided the code (below) to run this, but we will skip this section and use pheatmap to plot something much smaller (but still informative).
+```{r Large heatmap - memory intensive}
+load("Av_SigkMEs.RData")
+
+# Average the replicates to simplify the plot
+expressionMat<-do.call(cbind,TCs_List)
+colnames(expressionMat)
+
+# Rearrange so the colnames are "Treatment_Zt"
+tmp<-expressionMat
+spNms<-strsplit(x = colnames(expressionMat), split = "_")
+tnms<-sapply(spNms,function(x) paste(x[c(3, 2)],collapse = "_"))
+TreatByZt<-tapply(1:length(tnms),INDEX = tnms, function(x) tmp[,x])
+
+lapply(TreatByZt, names)
+dim(TreatByZt[[1]])
+
+# Want to average the 3 cols of each element into a single col
+expressionAvg = list()
+tc_means = list()
+for (i in 1:length(TreatByZt)) {
+  tc_means[[i]] = rowMeans(TreatByZt[[i]])
+  expressionAvg = do.call(cbind, tc_means)
+}
+
+# Pull colnames 
+eMatCols<-(unique(tnms))
+#this seems to work but looks weird in the environment...fine in View
+colnames(expressionAvg) = eMatCols
+
+# Make a color palette
+colFunc<-colorRampPalette(colors = c("darkblue","blue","lightblue","white","orange"))
+
+
+# Calculate the Pearson correlation to cluster the genes (helps with visualization); but can take a while
+#patternCor = cor(t(expressionAvg))
+#patternTree<-hclust(as.dist(1-patternCor),method = "complete")
+
+# Plot
+pheatmap(mat = expressionAvg[names(SigkMEs),], cluster_rows = patternTree, cluster_cols = F,scale = "row", color = colFunc(25), gaps_col = 4, show_rownames = F)
+```
+
+
+
+# More visualization. - the fun stuff 
+```{r Extra plots}
+pca = read.csv("snp_pcaDat.csv")
+
+ggplot(pca, aes(PC1, PC2, col = croptype)) + 
+  geom_point(aes(size = DiffArea)) +
+  scale_colour_manual(values=c("maroon", "darksalmon", "darkorchid4",  "lightsalmon4","steelblue4"), name = "Croptype") + coord_equal() +
+  xlab(paste0("PC1 (", signif(pve$pve[1], 3), "%)")) + 
+  ylab(paste0("PC2 (", signif(pve$pve[2], 3), "%)")) +
+  # Annoyingly, the degree of nudging (moving text away from points) has to be done manually
+  geom_label_repel(aes(label = ind), max.overlaps = 40, label.padding = .08, nudge_x = c(-0.5,.5, .2, .3, .8, 0.1, 0, .4, .4, .6, .5, -0.3, -0.5, -0.3, .3,0), nudge_y = c(0,0,0,.3, 0.4, .5, .6, 0, 0,0, .2, .3, 0, .3, 0, .4)) +
+  theme_classic() +
+  ggtitle("") +
+  xlim(-1, 1.2) +
+  ylim(-0.5, 1.2)
+
+
+## Add a labeling function to add numbers of kMEs per mod
+modLabels = as_labeller(c(`black` = "M5 (25,557)", `blue` = "M2 (52,246)", `brown` = "M1 (44,226)", `green` = "M4 (30,477)", 
+                          `greenyellow` = "M10 (8,230)", `magenta` = "M11 (15,640)", `pink` = "M7 (19,137)", `purple` = "M6 (8,199)",
+                          `red` = "M9 (29,947)", `turquoise` = "M8 (51,701)", `yellow` = "M3 (41,900)"))
+
+
+
+## Print many figures into a single pdf
+load("kME_ResponseScores.RData")
+
+pdf(file.path(FigPath, file = "V3_kME_ResponseScores.pdf"), width = 8, height = 5)
+kME_responseScores %>%
+  ggplot(aes(x = Zts, y = AvgResponse, group = Geno)) +
+  annotate(geom = "rect", xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = 0, fill = "chartreuse4", alpha = .2) +
+  annotate(geom = "rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = Inf, fill = "gold1", alpha = .2) +
+  geom_line() +
+  xlab("Zt (h)") +
+  ylab("Average response score") +
+  theme_bw() +
+  facet_wrap(~(factor(Module, levels = c("brown", "blue","yellow", "green", "black", "purple", 
+                                         "pink", "turquoise","red", "greenyellow", "magenta"))), labeller = modLabels)
+# ggtitle("kME Response scores")
+dev.off()
+
+```
+
+
+
+
